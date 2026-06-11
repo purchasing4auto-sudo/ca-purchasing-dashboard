@@ -196,7 +196,7 @@ export default function Home() {
       {/* Header */}
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="text-4xl font-bold text-slate-900">OpenClaw Monitor Dashboard</h1>
+          <h1 className="text-4xl font-bold text-slate-900">CA Purchasing Team - Monitor Dashboard</h1>
           <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
         </div>
         <div className="text-right">
