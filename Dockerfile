@@ -3,7 +3,7 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files and patches
+# Copy package files and patches first
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
 
@@ -24,7 +24,7 @@ WORKDIR /app
 # Copy package files
 COPY package.json pnpm-lock.yaml ./
 
-# Install production dependencies only
+# Install production dependencies
 RUN npm install -g pnpm && pnpm install --prod --frozen-lockfile
 
 # Copy built files from builder
