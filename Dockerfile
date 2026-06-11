@@ -21,8 +21,9 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files and patches
 COPY package.json pnpm-lock.yaml ./
+COPY patches ./patches
 
 # Install production dependencies
 RUN npm install -g pnpm && pnpm install --prod --frozen-lockfile
