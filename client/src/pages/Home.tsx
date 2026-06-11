@@ -191,6 +191,82 @@ export default function Home() {
     }
   };
 
+  // Show error message if Supabase is not configured
+  if (!isConnected && !loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-4xl font-bold text-slate-900">CA Purchasing Team - Monitor Dashboard</h1>
+            <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
+          </div>
+        </div>
+        <Alert className="border-yellow-200 bg-yellow-50">
+          <AlertCircle className="h-4 w-4 text-yellow-600" />
+          <AlertDescription className="text-yellow-800">
+            ⚠️ Dashboard is not connected to Supabase. Please configure the environment variables or check your connection.
+          </AlertDescription>
+        </Alert>
+        <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-slate-600">Total PRs</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-slate-900">0</div>
+              <p className="text-xs text-slate-500 mt-1">No data</p>
+            </CardContent>
+          </Card>
+          <Card className="border-red-200 bg-red-50">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-red-700">Timeout PRs</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-red-600">0</div>
+              <p className="text-xs text-red-600 mt-1">No data</p>
+            </CardContent>
+          </Card>
+          <Card className="border-green-200 bg-green-50">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-green-700">Completed</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-green-600">0</div>
+              <p className="text-xs text-green-600 mt-1">No data</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-slate-600">Suppliers Found</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-slate-900">0</div>
+              <p className="text-xs text-slate-500 mt-1">No data</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-slate-600">Avg Price</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-slate-900">$0</div>
+              <p className="text-xs text-slate-500 mt-1">No data</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-slate-600">Avg Rating</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-slate-900">0⭐</div>
+              <p className="text-xs text-slate-500 mt-1">No data</p>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
       {/* Header */}
