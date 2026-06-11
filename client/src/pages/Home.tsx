@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, Clock, CheckCircle2, TrendingUp, Users, Package } from "lucide-react";
+import { AlertCircle, Clock, CheckCircle2, TrendingUp, Users, Package, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { subscribeToPRChanges, subscribeToSearchResults, fetchPRs, fetchSearchResults, fetchPRStats, unsubscribeFromChanges } from "@/lib/supabase";
 
 interface PR {
   id: string;
@@ -31,7 +32,7 @@ interface DashboardStats {
   completedPRs: number;
   totalSuppliers: number;
   avgPrice: number;
-  avgRating: number;
+  avgRating: number | string;
 }
 
 export default function Home() {
@@ -47,102 +48,121 @@ export default function Home() {
   });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("overview");
+  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [isConnected, setIsConnected] = useState(false);
 
   // Get user info from URL parameters
   const params = new URLSearchParams(window.location.search);
   const userName = params.get("name") || "User";
 
+  // Calculate stats from data
+  const calculateStats = (prs: PR[], results: SearchResult[]) => {
+    const newStats = {
+      totalPRs: prs.length,
+      timeoutPRs: prs.filter(p => p.status === "timeout").length,
+      completedPRs: prs.filter(p => p.status === "completed").length,
+      totalSuppliers: results.length,
+      avgPrice: results.length > 0 ? Math.round(results.reduce((sum, r: any) => sum + (r.price || 0), 0) / results.length) : 0,
+      avgRating: results.length > 0 ? (results.reduce((sum, r: any) => sum + (r.rating || 0), 0) / results.length).toFixed(1) : 0,
+    };
+    setStats(newStats);
+  };
+
+  // Initial data fetch and real-time subscription setup
   useEffect(() => {
-    // Simulate fetching data from Supabase
-    // In production, replace with actual Supabase client calls
-    const fetchDashboardData = async () => {
+    let prSubscription: any = null;
+    let searchSubscription: any = null;
+
+    const setupRealtimeSubscriptions = async () => {
       try {
         setLoading(true);
-        
-        // Simulate API delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // Mock PR data
-        const mockPRs: PR[] = [
-          {
-            id: "1",
-            prNumber: "PR-231",
-            product: "Injecta Athena AC.VSA Chemical Feeding Pump",
-            salesperson: "AIA CHAN",
-            customer: "FNB Mr Mc",
-            status: "pending",
-            createdAt: new Date().toISOString(),
-            timeoutMinutes: 8,
-          },
-          {
-            id: "2",
-            prNumber: "PR-230",
-            product: "Industrial Valve Assembly",
-            salesperson: "John Doe",
-            customer: "ABC Corp",
-            status: "timeout",
-            createdAt: new Date(Date.now() - 15 * 60000).toISOString(),
-            timeoutMinutes: 15,
-          },
-          {
-            id: "3",
-            prNumber: "PR-229",
-            product: "Electrical Components",
-            salesperson: "Jane Smith",
-            customer: "XYZ Ltd",
-            status: "completed",
-            createdAt: new Date(Date.now() - 30 * 60000).toISOString(),
-          },
-        ];
+        // Fetch initial data
+        const [initialPRs, initialResults] = await Promise.all([
+          fetchPRs(),
+          fetchSearchResults(),
+        ]);
 
-        // Mock search results
-        const mockResults: SearchResult[] = [
-          {
-            id: "1",
-            prId: "1",
-            supplier: "MISUMI Industrial",
-            price: 1250,
-            rating: 4.8,
-            foundAt: new Date().toISOString(),
-          },
-          {
-            id: "2",
-            prId: "1",
-            supplier: "Festo Worldwide",
-            price: 1180,
-            rating: 4.6,
-            foundAt: new Date().toISOString(),
-          },
-          {
-            id: "3",
-            prId: "2",
-            supplier: "Sheikhan",
-            price: 890,
-            rating: 4.3,
-            foundAt: new Date(Date.now() - 5 * 60000).toISOString(),
-          },
-        ];
+        // Transform PR data
+        const transformedPRs = (initialPRs || []).map((pr: any) => ({
+          id: pr.id,
+          prNumber: pr.pr_number || pr.prNumber || `PR-${pr.id}`,
+          product: pr.product || pr.product_name || "",
+          salesperson: pr.salesperson || pr.sales_person || "",
+          customer: pr.customer || pr.customer_name || "",
+          status: pr.status || "pending",
+          createdAt: pr.created_at || new Date().toISOString(),
+          timeoutMinutes: pr.timeout_minutes || undefined,
+        }));
 
-        setPrList(mockPRs);
-        setSearchResults(mockResults);
+        // Transform search results
+        const transformedResults = (initialResults || []).map((result: any) => ({
+          id: result.id,
+          prId: result.pr_id || result.prId || "",
+          supplier: result.supplier || result.supplier_name || "",
+          price: result.price || 0,
+          rating: result.rating || 0,
+          foundAt: result.found_at || result.foundAt || new Date().toISOString(),
+        }));
 
-        // Calculate stats
-        setStats({
-          totalPRs: mockPRs.length,
-          timeoutPRs: mockPRs.filter(p => p.status === "timeout").length,
-          completedPRs: mockPRs.filter(p => p.status === "completed").length,
-          totalSuppliers: mockResults.length,
-          avgPrice: Math.round(mockResults.reduce((sum, r) => sum + r.price, 0) / mockResults.length),
-          avgRating: (mockResults.reduce((sum, r) => sum + r.rating, 0) / mockResults.length).toFixed(1) as any,
+        setPrList(transformedPRs);
+        setSearchResults(transformedResults);
+        calculateStats(transformedPRs, transformedResults);
+        setIsConnected(true);
+        setLastUpdate(new Date());
+
+        // Subscribe to PR changes
+        prSubscription = subscribeToPRChanges((payload: any) => {
+          console.log("PR update received:", payload);
+          fetchPRs().then((updatedPRs) => {
+            const transformed = (updatedPRs || []).map((pr: any) => ({
+              id: pr.id,
+              prNumber: pr.pr_number || pr.prNumber || `PR-${pr.id}`,
+              product: pr.product || pr.product_name || "",
+              salesperson: pr.salesperson || pr.sales_person || "",
+              customer: pr.customer || pr.customer_name || "",
+              status: pr.status || "pending",
+              createdAt: pr.created_at || new Date().toISOString(),
+              timeoutMinutes: pr.timeout_minutes || undefined,
+            }));
+            setPrList(transformed);
+            calculateStats(transformed, searchResults);
+            setLastUpdate(new Date());
+          });
+        });
+
+        // Subscribe to search results changes
+        searchSubscription = subscribeToSearchResults((payload: any) => {
+          console.log("Search result update received:", payload);
+          fetchSearchResults().then((updatedResults) => {
+            const transformed = (updatedResults || []).map((result: any) => ({
+              id: result.id,
+              prId: result.pr_id || result.prId || "",
+              supplier: result.supplier || result.supplier_name || "",
+              price: result.price || 0,
+              rating: result.rating || 0,
+              foundAt: result.found_at || result.foundAt || new Date().toISOString(),
+            }));
+            setSearchResults(transformed);
+            calculateStats(prList, transformed);
+            setLastUpdate(new Date());
+          });
         });
       } catch (error) {
-        console.error("Error fetching dashboard data:", error);
+        console.error("Error setting up real-time subscriptions:", error);
+        setIsConnected(false);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchDashboardData();
+    setupRealtimeSubscriptions();
+
+    // Cleanup subscriptions on unmount
+    return () => {
+      if (prSubscription) unsubscribeFromChanges(prSubscription);
+      if (searchSubscription) unsubscribeFromChanges(searchSubscription);
+    };
   }, []);
 
   const getStatusColor = (status: string) => {
@@ -174,9 +194,22 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
       {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-4xl font-bold text-slate-900">OpenClaw Monitor Dashboard</h1>
-        <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
+      <div className="mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="text-4xl font-bold text-slate-900">OpenClaw Monitor Dashboard</h1>
+          <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
+        </div>
+        <div className="text-right">
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${isConnected ? 'bg-green-100' : 'bg-red-100'}`}>
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-600 animate-pulse' : 'bg-red-600'}`}></div>
+            <span className={`text-sm font-medium ${isConnected ? 'text-green-700' : 'text-red-700'}`}>
+              {isConnected ? 'Live' : 'Offline'}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">
+            Updated: {lastUpdate.toLocaleTimeString()}
+          </p>
+        </div>
       </div>
 
       {/* Critical Alerts */}
@@ -265,11 +298,16 @@ export default function Home() {
           <Card>
             <CardHeader>
               <CardTitle>Purchase Requests</CardTitle>
-              <CardDescription>Real-time PR status and details</CardDescription>
+              <CardDescription>Real-time PR status and details (Live from Supabase)</CardDescription>
             </CardHeader>
             <CardContent>
               {loading ? (
-                <div className="text-center py-8 text-slate-500">Loading PR data...</div>
+                <div className="text-center py-8 text-slate-500">
+                  <RefreshCw className="w-6 h-6 mx-auto mb-2 animate-spin" />
+                  Loading PR data...
+                </div>
+              ) : prList.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">No PRs found</div>
               ) : (
                 <div className="space-y-4">
                   {prList.map((pr) => (
@@ -320,11 +358,16 @@ export default function Home() {
           <Card>
             <CardHeader>
               <CardTitle>Supplier Search Results</CardTitle>
-              <CardDescription>Found suppliers with pricing and ratings</CardDescription>
+              <CardDescription>Found suppliers with pricing and ratings (Live from Supabase)</CardDescription>
             </CardHeader>
             <CardContent>
               {loading ? (
-                <div className="text-center py-8 text-slate-500">Loading search results...</div>
+                <div className="text-center py-8 text-slate-500">
+                  <RefreshCw className="w-6 h-6 mx-auto mb-2 animate-spin" />
+                  Loading search results...
+                </div>
+              ) : searchResults.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">No search results found</div>
               ) : (
                 <div className="space-y-3">
                   {searchResults.map((result) => (
@@ -357,12 +400,14 @@ export default function Home() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Response Time</span>
-                  <span className="font-semibold text-green-600">✓ Normal</span>
+                  <span className="text-slate-600">Supabase Connection</span>
+                  <span className={`font-semibold ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
+                    {isConnected ? '✓ Connected' : '✗ Disconnected'}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Database Connection</span>
-                  <span className="font-semibold text-green-600">✓ Connected</span>
+                  <span className="text-slate-600">Real-time Sync</span>
+                  <span className="font-semibold text-green-600">✓ Active</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-600">Telegram Bot</span>
@@ -397,7 +442,7 @@ export default function Home() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-600">Last Update</span>
-                  <span className="font-semibold text-slate-900">Just now</span>
+                  <span className="font-semibold text-slate-900">{lastUpdate.toLocaleTimeString()}</span>
                 </div>
               </CardContent>
             </Card>
@@ -408,7 +453,7 @@ export default function Home() {
       {/* Footer */}
       <div className="mt-8 text-center text-sm text-slate-500">
         <p>🦞 OpenClaw Dragon Lobster Monitoring System</p>
-        <p>Last synced: {new Date().toLocaleString()}</p>
+        <p>Last synced: {lastUpdate.toLocaleString()}</p>
       </div>
     </div>
   );
