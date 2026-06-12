@@ -1,535 +1,552 @@
-import { useEffect, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { AlertCircle, Clock, CheckCircle2, TrendingUp, Users, Package, RefreshCw } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { subscribeToPRChanges, subscribeToSearchResults, fetchPRs, fetchSearchResults, fetchPRStats, unsubscribeFromChanges } from "@/lib/supabase";
+import React, { useState, useEffect, useCallback } from 'react';
+import { useLocation } from 'wouter';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Spinner } from '@/components/ui/spinner';
+import { supabase, logQuery } from '@/lib/supabase';
+import { Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { formatDistanceToNow, format } from 'date-fns';
+import { zhTW } from 'date-fns/locale';
 
 interface PR {
   id: string;
-  prNumber: string;
-  product: string;
-  salesperson: string;
-  customer: string;
-  status: "pending" | "timeout" | "completed";
-  createdAt: string;
-  timeoutMinutes?: number;
+  pr_id: string;
+  pr_number: number;
+  created_at: string;
+  source: string;
+  product_name: string;
+  quantity?: number | null;
+  specs_notes?: string | null;
+  salesman?: string | null;
+  customer_name?: string | null;
+  photos?: string | null;
+  status?: string | null;
+  assignee_id?: string | null;
+  assignee_name?: string | null;
+  search_method?: string | null;
+  comparison?: string | null;
+  supplier?: string | null;
+  price?: number | null;
+  currency?: string | null;
+  email_sent_at?: string | null;
+  supplier_reply?: string | null;
+  notes?: string | null;
+  updated_at?: string | null;
+  accepted_at?: string | null;
+  po?: string | null;
+  remark?: string | null;
+  follow_up?: number | null;
+  notified_leader?: boolean | null;
+  [key: string]: any;
 }
 
-interface SearchResult {
-  id: string;
-  prId: string;
-  supplier: string;
-  price: number;
-  rating: number;
-  foundAt: string;
-}
+const ITEMS_PER_PAGE = 8;
+const ITEMS_PER_ROW = 2;
 
-interface DashboardStats {
-  totalPRs: number;
-  timeoutPRs: number;
-  completedPRs: number;
-  totalSuppliers: number;
-  avgPrice: number;
-  avgRating: number | string;
-}
+// Color schemes for each page
+  const colorSchemes = [
+    { bg: 'from-blue-50 to-cyan-50', header: 'from-blue-200/40 to-cyan-200/40', border: 'border-blue-200/50', accent: 'bg-blue-100/50', text: 'text-black', label: 'text-black', divider: 'border-blue-100/50' },
+    { bg: 'from-emerald-50 to-teal-50', header: 'from-emerald-200/40 to-teal-200/40', border: 'border-emerald-200/50', accent: 'bg-emerald-100/50', text: 'text-black', label: 'text-black', divider: 'border-emerald-100/50' },
+    { bg: 'from-purple-50 to-pink-50', header: 'from-purple-200/40 to-pink-200/40', border: 'border-purple-200/50', accent: 'bg-purple-100/50', text: 'text-black', label: 'text-black', divider: 'border-purple-100/50' },
+    { bg: 'from-amber-50 to-orange-50', header: 'from-amber-200/40 to-orange-200/40', border: 'border-amber-200/50', accent: 'bg-amber-100/50', text: 'text-black', label: 'text-black', divider: 'border-amber-100/50' },
+  ];
 
 export default function Home() {
-  const [prList, setPrList] = useState<PR[]>([]);
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [stats, setStats] = useState<DashboardStats>({
-    totalPRs: 0,
-    timeoutPRs: 0,
-    completedPRs: 0,
-    totalSuppliers: 0,
-    avgPrice: 0,
-    avgRating: 0,
-  });
+  const [_location, navigate] = useLocation();
+  const [prs, setPrs] = useState<PR[]>([]);
+  const [filteredPrs, setFilteredPrs] = useState<PR[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("overview");
-  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isOnline, setIsOnline] = useState(false);
 
-  // Get user info from URL parameters
-  const params = new URLSearchParams(window.location.search);
-  const userName = params.get("name") || "User";
+  // Fetch all PRs
+  const fetchPRs = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
 
-  // Calculate stats from data
-  const calculateStats = (prs: PR[], results: SearchResult[]) => {
-    const newStats = {
-      totalPRs: prs.length,
-      timeoutPRs: prs.filter(p => p.status === "timeout").length,
-      completedPRs: prs.filter(p => p.status === "completed").length,
-      totalSuppliers: results.length,
-      avgPrice: results.length > 0 ? Math.round(results.reduce((sum, r: any) => sum + (r.price || 0), 0) / results.length) : 0,
-      avgRating: results.length > 0 ? (results.reduce((sum, r: any) => sum + (r.rating || 0), 0) / results.length).toFixed(1) : 0,
-    };
-    setStats(newStats);
-  };
-
-  // Initial data fetch and real-time subscription setup
-  useEffect(() => {
-    let prSubscription: any = null;
-    let searchSubscription: any = null;
-
-    const setupRealtimeSubscriptions = async () => {
-      try {
-        setLoading(true);
-
-        // Fetch initial data
-        const [initialPRs, initialResults] = await Promise.all([
-          fetchPRs(),
-          fetchSearchResults(),
-        ]);
-
-        // Transform PR data
-        const transformedPRs = (initialPRs || []).map((pr: any) => ({
-          id: pr.id,
-          prNumber: pr.pr_number || pr.prNumber || `PR-${pr.id}`,
-          product: pr.product || pr.product_name || "",
-          salesperson: pr.salesperson || pr.sales_person || "",
-          customer: pr.customer || pr.customer_name || "",
-          status: pr.status || "pending",
-          createdAt: pr.created_at || new Date().toISOString(),
-          timeoutMinutes: pr.timeout_minutes || undefined,
-        }));
-
-        // Transform search results
-        const transformedResults = (initialResults || []).map((result: any) => ({
-          id: result.id,
-          prId: result.pr_id || result.prId || "",
-          supplier: result.supplier || result.supplier_name || "",
-          price: result.price || 0,
-          rating: result.rating || 0,
-          foundAt: result.found_at || result.foundAt || new Date().toISOString(),
-        }));
-
-        setPrList(transformedPRs);
-        setSearchResults(transformedResults);
-        calculateStats(transformedPRs, transformedResults);
-        setIsConnected(true);
-        setLastUpdate(new Date());
-
-        // Subscribe to PR changes
-        prSubscription = subscribeToPRChanges((payload: any) => {
-          console.log("PR update received:", payload);
-          fetchPRs().then((updatedPRs) => {
-            const transformed = (updatedPRs || []).map((pr: any) => ({
-              id: pr.id,
-              prNumber: pr.pr_number || pr.prNumber || `PR-${pr.id}`,
-              product: pr.product || pr.product_name || "",
-              salesperson: pr.salesperson || pr.sales_person || "",
-              customer: pr.customer || pr.customer_name || "",
-              status: pr.status || "pending",
-              createdAt: pr.created_at || new Date().toISOString(),
-              timeoutMinutes: pr.timeout_minutes || undefined,
-            }));
-            setPrList(transformed);
-            calculateStats(transformed, searchResults);
-            setLastUpdate(new Date());
-          });
-        });
-
-        // Subscribe to search results changes
-        searchSubscription = subscribeToSearchResults((payload: any) => {
-          console.log("Search result update received:", payload);
-          fetchSearchResults().then((updatedResults) => {
-            const transformed = (updatedResults || []).map((result: any) => ({
-              id: result.id,
-              prId: result.pr_id || result.prId || "",
-              supplier: result.supplier || result.supplier_name || "",
-              price: result.price || 0,
-              rating: result.rating || 0,
-              foundAt: result.found_at || result.foundAt || new Date().toISOString(),
-            }));
-            setSearchResults(transformed);
-            calculateStats(prList, transformed);
-            setLastUpdate(new Date());
-          });
-        });
-      } catch (error) {
-        console.error("Error setting up real-time subscriptions:", error);
-        setIsConnected(false);
-      } finally {
-        setLoading(false);
+      if (!supabase.isConfigured) {
+        setIsOnline(false);
+        setError('Supabase 未配置');
+        return;
       }
-    };
 
-    setupRealtimeSubscriptions();
+      setIsOnline(true);
 
-    // Cleanup subscriptions on unmount
-    return () => {
-      if (prSubscription) unsubscribeFromChanges(prSubscription);
-      if (searchSubscription) unsubscribeFromChanges(searchSubscription);
-    };
+      const { data, error: err } = await supabase.client
+        .from('purchase_requests')
+        .select('*')
+        .order('pr_number', { ascending: true });
+
+      if (err) throw err;
+
+      const sortedData = (data || []).sort((a: PR, b: PR) => a.pr_number - b.pr_number);
+      setPrs(sortedData);
+      setFilteredPrs(sortedData);
+      setCurrentPage(1);
+
+      // Log the query
+      await logQuery('fetch_all_prs', `Fetched ${sortedData.length} PRs`);
+    } catch (err) {
+      console.error('Error fetching PRs:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch PRs');
+      setIsOnline(false);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "pending":
-        return "bg-yellow-100 text-yellow-800";
-      case "timeout":
-        return "bg-red-100 text-red-800";
-      case "completed":
-        return "bg-green-100 text-green-800";
-      default:
-        return "bg-gray-100 text-gray-800";
+  // Initial load
+  useEffect(() => {
+    fetchPRs();
+  }, [fetchPRs]);
+
+  // Subscribe to real-time updates
+  useEffect(() => {
+    if (!supabase.isConfigured) return;
+
+    try {
+      const subscription = supabase.client
+        .channel('purchase_requests')
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'purchase_requests',
+          },
+          (payload: any) => {
+            console.log('Real-time update:', payload);
+            
+            if (payload.eventType === 'INSERT') {
+              const newPR = payload.new as PR;
+              setPrs((prev) => {
+                const updated = [...prev, newPR];
+                return updated.sort((a: PR, b: PR) => a.pr_number - b.pr_number);
+              });
+              setFilteredPrs((prev) => {
+                const updated = [...prev, newPR];
+                return updated.sort((a: PR, b: PR) => a.pr_number - b.pr_number);
+              });
+            } else if (payload.eventType === 'UPDATE') {
+              const updatedPR = payload.new as PR;
+              setPrs((prev) =>
+                prev.map((pr) => (pr.id === updatedPR.id ? updatedPR : pr))
+              );
+              setFilteredPrs((prev) =>
+                prev.map((pr) => (pr.id === updatedPR.id ? updatedPR : pr))
+              );
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old.id;
+              setPrs((prev) => prev.filter((pr) => pr.id !== deletedId));
+              setFilteredPrs((prev) => prev.filter((pr) => pr.id !== deletedId));
+            }
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.client.removeChannel(subscription);
+      };
+    } catch (err) {
+      console.error('Error setting up real-time subscription:', err);
     }
+  }, []);
+
+  // Handle search
+  const handleSearch = useCallback(
+    (query: string) => {
+      setSearchQuery(query);
+      setCurrentPage(1);
+
+      if (!query.trim()) {
+        setFilteredPrs(prs);
+        return;
+      }
+
+      const lowerQuery = query.toLowerCase();
+      const filtered = prs.filter((pr) => {
+        const searchableFields = [
+          pr.pr_id,
+          pr.pr_number.toString(),
+          pr.product_name,
+          pr.source,
+          pr.salesman,
+          pr.customer_name,
+          pr.supplier,
+          pr.notes,
+          pr.remark,
+          pr.status,
+        ];
+        return searchableFields.some((field) =>
+          field?.toLowerCase().includes(lowerQuery)
+        );
+      });
+
+      setFilteredPrs(filtered);
+      logQuery('search_prs', `Searched for "${query}", found ${filtered.length} results`);
+    },
+    [prs]
+  );
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setFilteredPrs(prs);
+    setCurrentPage(1);
   };
 
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case "pending":
-        return <Clock className="w-4 h-4" />;
-      case "timeout":
-        return <AlertCircle className="w-4 h-4" />;
-      case "completed":
-        return <CheckCircle2 className="w-4 h-4" />;
-      default:
-        return null;
-    }
+  // Calculate pagination
+  const totalPages = Math.ceil(filteredPrs.length / ITEMS_PER_PAGE);
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const currentPRs = filteredPrs.slice(startIndex, endIndex);
+
+  const handlePrevPage = () => {
+    setCurrentPage((prev) => Math.max(prev - 1, 1));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Show error message if Supabase is not configured
-  if (!isConnected && !loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
-        <div className="mb-8 flex items-center justify-between">
-          <div>
-            <h1 className="text-4xl font-bold text-slate-900">CA Purchasing Team - Monitor Dashboard</h1>
-            <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
+  const handleNextPage = () => {
+    setCurrentPage((prev) => Math.min(prev + 1, totalPages));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const colorScheme = colorSchemes[(currentPage - 1) % colorSchemes.length];
+
+  const renderDetailField = (label: string, value: any) => {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+    
+    // Determine color based on field type
+    let valueColor = 'text-gray-600'; // Default gray
+    const valueStr = String(value).toLowerCase();
+    
+    // Price fields - green
+    if (label.toLowerCase().includes('price') || label.toLowerCase().includes('cost')) {
+      valueColor = 'text-green-700 font-semibold';
+    }
+    // Comparison/Link fields - blue
+    else if (label.toLowerCase().includes('comparison') || label.toLowerCase().includes('link')) {
+      valueColor = 'text-blue-600 font-medium';
+    }
+    // Status fields - conditional colors
+    else if (label.toLowerCase().includes('status')) {
+      if (valueStr.includes('已結案') || valueStr.includes('completed')) {
+        valueColor = 'text-green-700 font-semibold';
+      } else if (valueStr.includes('已取消') || valueStr.includes('cancelled')) {
+        valueColor = 'text-red-700 font-semibold';
+      } else {
+        valueColor = 'text-yellow-700 font-semibold';
+      }
+    }
+    
+    // Check if this is a people field that should show avatar
+    const isPeopleField = label.toLowerCase().includes('assignee') || label.toLowerCase().includes('salesman') || label.toLowerCase().includes('customer');
+    
+    if (isPeopleField) {
+      const initials = String(value)
+        .split(' ')
+        .map(n => n[0])
+        .join('')
+        .toUpperCase()
+        .substring(0, 2);
+      
+      return (
+        <div key={label} className="flex justify-between py-1 text-xs border-b border-gray-200 border-opacity-50 last:border-b-0 items-center">
+          <span className="text-gray-500 min-w-[70px] truncate font-normal">{label}:</span>
+          <div className="flex items-center gap-2 ml-2">
+            <div className="w-6 h-6 rounded-full bg-purple-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">
+              {initials}
+            </div>
+            <span className="text-gray-600 text-right flex-1 break-words text-xs">{String(value).substring(0, 30)}</span>
           </div>
         </div>
-        <Alert className="border-yellow-200 bg-yellow-50">
-          <AlertCircle className="h-4 w-4 text-yellow-600" />
-          <AlertDescription className="text-yellow-800">
-            ⚠️ Dashboard is not connected to Supabase. Please configure the environment variables or check your connection.
-          </AlertDescription>
-        </Alert>
-        <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-slate-600">Total PRs</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-slate-900">0</div>
-              <p className="text-xs text-slate-500 mt-1">No data</p>
-            </CardContent>
-          </Card>
-          <Card className="border-red-200 bg-red-50">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-red-700">Timeout PRs</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-red-600">0</div>
-              <p className="text-xs text-red-600 mt-1">No data</p>
-            </CardContent>
-          </Card>
-          <Card className="border-green-200 bg-green-50">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-green-700">Completed</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-green-600">0</div>
-              <p className="text-xs text-green-600 mt-1">No data</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-slate-600">Suppliers Found</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-slate-900">0</div>
-              <p className="text-xs text-slate-500 mt-1">No data</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-slate-600">Avg Price</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-slate-900">$0</div>
-              <p className="text-xs text-slate-500 mt-1">No data</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-slate-600">Avg Rating</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-slate-900">0⭐</div>
-              <p className="text-xs text-slate-500 mt-1">No data</p>
-            </CardContent>
-          </Card>
+      );
+    }
+    
+    return (
+      <div key={label} className="flex justify-between py-1 text-xs border-b border-gray-200 border-opacity-50 last:border-b-0">
+        <span className="text-gray-500 min-w-[70px] truncate font-normal">{label}:</span>
+        <span className={`text-right ml-2 flex-1 break-words text-xs ${valueColor}`}>{String(value).substring(0, 40)}</span>
+      </div>
+    );
+  };
+
+  const renderDetailSection = (title: string, fields: Record<string, any>) => {
+    const filledFields = Object.entries(fields).filter(([_, value]) => value !== null && value !== undefined && value !== '');
+    if (filledFields.length === 0) return null;
+
+    return (
+      <div key={title} className="mb-2">
+        <h4 className="text-gray-400 text-[10px] mb-1 pb-0.5 uppercase tracking-widest font-semibold">{title}</h4>
+        <div className="space-y-0">
+          {filledFields.map(([label, value]) => renderDetailField(label, value))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPRCard = (pr: PR) => {
+    const createdDate = new Date(pr.created_at);
+    const formattedDate = format(createdDate, 'MM-dd HH:mm', { locale: zhTW });
+
+    const basicInfo = {
+      'PR ID': pr.pr_id,
+      'PR#': `#${pr.pr_number}`,
+      'Created': formattedDate,
+      'Source': pr.source,
+    };
+
+    const productInfo = {
+      'Product': pr.product_name,
+      'Quantity': pr.quantity,
+      'Specs Notes': pr.specs_notes ? pr.specs_notes.substring(0, 30) : '-',
+    };
+
+    const peopleInfo = {
+      'Salesman': pr.salesman,
+      'Customer': pr.customer_name,
+      'Assignee': pr.assignee_name,
+    };
+
+    const statusInfo = {
+      'Status': pr.status,
+      'Search Method': pr.search_method,
+      'Comparison': pr.comparison ? pr.comparison.substring(0, 20) : '-',
+      'Follow-up': pr.follow_up,
+    };
+
+    const supplierInfo = {
+      'Supplier': pr.supplier,
+      'Price': pr.price ? `${pr.price} ${pr.currency || 'USD'}` : '-',
+      'Photos': pr.photos ? 'Yes' : '-',
+    };
+
+    const documentInfo = {
+      'PO': pr.po,
+      'Notes': pr.notes ? pr.notes.substring(0, 25) : '-',
+      'Remark': pr.remark ? pr.remark.substring(0, 20) : '-',
+    };
+
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 border-opacity-30 shadow-sm overflow-hidden h-full">
+        {/* PR Header */}
+        <div className={`bg-gradient-to-r ${colorScheme.header} px-3 py-2.5 border-b border-gray-200 border-opacity-30`}>
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className={`text-base font-bold ${colorScheme.text} truncate`}>{pr.pr_id}</span>
+                <span className={`inline-block px-2 py-0.5 ${colorScheme.accent} ${colorScheme.text} text-xs font-semibold rounded-full truncate`}>
+                  {pr.source}
+                </span>
+              </div>
+              {pr.status && (
+                <span className={`inline-block px-2 py-0.5 text-xs font-semibold rounded-full truncate mb-1 ${
+                  pr.status.includes('已取消') ? 'bg-red-100 text-red-800' :
+                  pr.status.includes('已結案') ? 'bg-green-100 text-green-800' :
+                  'bg-yellow-100 text-yellow-800'
+                }`}>
+                  {pr.status}
+                </span>
+              )}
+              <p className={`text-xs ${colorScheme.text} font-medium truncate`}>{pr.product_name}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* PR Details - Grid Layout */}
+        <div className="px-3 py-2.5 text-xs">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              {renderDetailSection('BASIC', basicInfo)}
+              {renderDetailSection('PRODUCT', productInfo)}
+            </div>
+            <div className="border-l border-gray-300 border-opacity-40 pl-3">
+              {renderDetailSection('PEOPLE', peopleInfo)}
+              {renderDetailSection('STATUS', statusInfo)}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <div>
+              {renderDetailSection('SUPPLIER', supplierInfo)}
+            </div>
+            <div>
+              {renderDetailSection('DOCUMENT', documentInfo)}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  if (!supabase.isConfigured) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6 flex items-center justify-center">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold text-slate-900 mb-4">⚠️ 配置錯誤</h1>
+          <p className="text-slate-700">Supabase 環境變數未配置</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
-      {/* Header */}
-      <div className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="text-4xl font-bold text-slate-900">CA Purchasing Team - Monitor Dashboard</h1>
-          <p className="text-slate-600 mt-2">Welcome, {userName} 👋</p>
+    <div className={`min-h-screen bg-gradient-to-br ${colorScheme.bg} p-6`}>
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-3xl font-bold text-slate-900 mb-1">
+                CA Purchasing Team
+              </h1>
+              <p className="text-slate-700 text-base">Monitor Dashboard</p>
+              <p className="text-slate-600 text-sm mt-1">Welcome, User 👋</p>
+            </div>
+            <div className="text-right">
+              <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-semibold ${
+                isOnline ? 'bg-green-200 text-green-800' : 'bg-red-200 text-red-800'
+              }`}>
+                <div className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-green-600' : 'bg-red-600'}`} />
+                {isOnline ? 'Online' : 'Offline'}
+              </div>
+              <p className="text-slate-600 text-xs mt-2">Updated: {new Date().toLocaleTimeString()}</p>
+            </div>
+          </div>
+
+          {/* Statistics */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className={`bg-white rounded-lg p-3 border ${colorScheme.border} shadow-sm`}>
+              <p className={`${colorScheme.label} text-xs font-medium`}>Total PRs</p>
+              <p className={`text-2xl font-bold ${colorScheme.text} mt-1`}>{prs.length}</p>
+            </div>
+            <div className={`bg-white rounded-lg p-3 border ${colorScheme.border} shadow-sm`}>
+              <p className={`${colorScheme.label} text-xs font-medium`}>Search Results</p>
+              <p className={`text-2xl font-bold ${colorScheme.text} mt-1`}>{filteredPrs.length}</p>
+            </div>
+            <div className={`bg-white rounded-lg p-3 border ${colorScheme.border} shadow-sm`}>
+              <p className={`${colorScheme.label} text-xs font-medium`}>Current Page</p>
+              <p className={`text-2xl font-bold ${colorScheme.text} mt-1`}>{currentPage} / {totalPages}</p>
+            </div>
+            <div className={`bg-white rounded-lg p-3 border ${colorScheme.border} shadow-sm`}>
+              <p className={`${colorScheme.label} text-xs font-medium`}>Items Per Page</p>
+              <p className={`text-2xl font-bold ${colorScheme.text} mt-1`}>{ITEMS_PER_PAGE}</p>
+            </div>
+          </div>
+
+          {/* Search Bar */}
+          <div className="relative">
+            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-slate-400" size={18} />
+            <Input
+              type="text"
+              placeholder="Search PR ID, Product, Supplier, Customer..."
+              value={searchQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+              className="pl-12 pr-12 py-3 bg-white border-slate-300 text-slate-900 placeholder-slate-500 rounded-lg shadow-sm focus:ring-slate-400 focus:border-slate-400"
+            />
+            {searchQuery && (
+              <button
+                onClick={handleClearSearch}
+                className="absolute right-4 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            )}
+          </div>
         </div>
-        <div className="text-right">
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${isConnected ? 'bg-green-100' : 'bg-red-100'}`}>
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-600 animate-pulse' : 'bg-red-600'}`}></div>
-            <span className={`text-sm font-medium ${isConnected ? 'text-green-700' : 'text-red-700'}`}>
-              {isConnected ? 'Live' : 'Offline'}
+
+        {/* Loading State */}
+        {loading && (
+          <div className="flex items-center justify-center py-12">
+            <Spinner />
+          </div>
+        )}
+
+        {/* Error State */}
+        {error && !loading && (
+          <div className="bg-red-100 border border-red-300 rounded-lg p-4 mb-4">
+            <p className="text-red-800">❌ {error}</p>
+          </div>
+        )}
+
+        {/* Main Content - Left Right Split */}
+        {!loading && filteredPrs.length > 0 && (
+          <div className="grid grid-cols-2 gap-6 mb-6">
+            {currentPRs.map((pr, index) => (
+              <div key={pr.id}>
+                {renderPRCard(pr)}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Empty State */}
+        {!loading && filteredPrs.length === 0 && (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <p className="text-slate-700 text-lg mb-4">No PRs found</p>
+              {searchQuery && (
+                <Button
+                  onClick={handleClearSearch}
+                  className="bg-slate-600 hover:bg-slate-700 text-white rounded-lg"
+                >
+                  Clear Search
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Pagination Controls */}
+        {!loading && filteredPrs.length > 0 && totalPages > 1 && (
+          <div className="flex items-center justify-center gap-2 flex-wrap bg-white rounded-lg p-4 border border-slate-300 shadow-sm">
+            <Button
+              onClick={handlePrevPage}
+              disabled={currentPage === 1}
+              className="bg-slate-600 hover:bg-slate-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            >
+              <ChevronLeft size={16} />
+              Previous
+            </Button>
+
+            <div className="flex items-center gap-1">
+              {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                const page = Math.max(1, currentPage - 3) + i;
+                if (page > totalPages) return null;
+                return (
+                  <Button
+                    key={page}
+                    onClick={() => {
+                      setCurrentPage(page);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className={currentPage === page 
+                      ? 'bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-xs' 
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs transition-colors'}
+                  >
+                    {page}
+                  </Button>
+                );
+              })}
+            </div>
+
+            <Button
+              onClick={handleNextPage}
+              disabled={currentPage === totalPages}
+              className="bg-slate-600 hover:bg-slate-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            >
+              Next
+              <ChevronRight size={16} />
+            </Button>
+
+            <span className="text-slate-700 text-xs ml-2 font-medium">
+              Page {currentPage} of {totalPages}
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-2">
-            Updated: {lastUpdate.toLocaleTimeString()}
-          </p>
-        </div>
-      </div>
-
-      {/* Critical Alerts */}
-      {stats.timeoutPRs > 0 && (
-        <Alert className="mb-6 border-red-200 bg-red-50">
-          <AlertCircle className="h-4 w-4 text-red-600" />
-          <AlertDescription className="text-red-800">
-            ⚠️ {stats.timeoutPRs} PR(s) have exceeded the 10-minute response time. Immediate action required!
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4 mb-8">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-slate-600">Total PRs</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-slate-900">{stats.totalPRs}</div>
-            <p className="text-xs text-slate-500 mt-1">Active requests</p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-red-200 bg-red-50">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-red-700">Timeout PRs</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-red-600">{stats.timeoutPRs}</div>
-            <p className="text-xs text-red-600 mt-1">Need attention</p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-green-200 bg-green-50">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-green-700">Completed</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-green-600">{stats.completedPRs}</div>
-            <p className="text-xs text-green-600 mt-1">Success rate</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-slate-600">Suppliers Found</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-slate-900">{stats.totalSuppliers}</div>
-            <p className="text-xs text-slate-500 mt-1">This session</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-slate-600">Avg Price</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-slate-900">${stats.avgPrice}</div>
-            <p className="text-xs text-slate-500 mt-1">USD</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-slate-600">Avg Rating</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-slate-900">{stats.avgRating}⭐</div>
-            <p className="text-xs text-slate-500 mt-1">Supplier quality</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Main Content Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="overview">PR Overview</TabsTrigger>
-          <TabsTrigger value="search">Search Results</TabsTrigger>
-          <TabsTrigger value="performance">Performance</TabsTrigger>
-        </TabsList>
-
-        {/* PR Overview Tab */}
-        <TabsContent value="overview">
-          <Card>
-            <CardHeader>
-              <CardTitle>Purchase Requests</CardTitle>
-              <CardDescription>Real-time PR status and details (Live from Supabase)</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loading ? (
-                <div className="text-center py-8 text-slate-500">
-                  <RefreshCw className="w-6 h-6 mx-auto mb-2 animate-spin" />
-                  Loading PR data...
-                </div>
-              ) : prList.length === 0 ? (
-                <div className="text-center py-8 text-slate-500">No PRs found</div>
-              ) : (
-                <div className="space-y-4">
-                  {prList.map((pr) => (
-                    <div key={pr.id} className="border rounded-lg p-4 hover:bg-slate-50 transition">
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <h3 className="font-semibold text-slate-900">{pr.prNumber}</h3>
-                            <Badge className={getStatusColor(pr.status)}>
-                              {getStatusIcon(pr.status)}
-                              <span className="ml-1">{pr.status.toUpperCase()}</span>
-                            </Badge>
-                            {pr.timeoutMinutes && (
-                              <span className="text-xs text-red-600 font-medium">
-                                ⏱️ {pr.timeoutMinutes}min
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-sm text-slate-600">{pr.product}</p>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-3 gap-4 text-sm">
-                        <div>
-                          <p className="text-slate-500">Salesperson</p>
-                          <p className="font-medium text-slate-900">{pr.salesperson}</p>
-                        </div>
-                        <div>
-                          <p className="text-slate-500">Customer</p>
-                          <p className="font-medium text-slate-900">{pr.customer}</p>
-                        </div>
-                        <div>
-                          <p className="text-slate-500">Created</p>
-                          <p className="font-medium text-slate-900">
-                            {new Date(pr.createdAt).toLocaleTimeString()}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Search Results Tab */}
-        <TabsContent value="search">
-          <Card>
-            <CardHeader>
-              <CardTitle>Supplier Search Results</CardTitle>
-              <CardDescription>Found suppliers with pricing and ratings (Live from Supabase)</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loading ? (
-                <div className="text-center py-8 text-slate-500">
-                  <RefreshCw className="w-6 h-6 mx-auto mb-2 animate-spin" />
-                  Loading search results...
-                </div>
-              ) : searchResults.length === 0 ? (
-                <div className="text-center py-8 text-slate-500">No search results found</div>
-              ) : (
-                <div className="space-y-3">
-                  {searchResults.map((result) => (
-                    <div key={result.id} className="border rounded-lg p-4 hover:bg-slate-50 transition">
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1">
-                          <h4 className="font-semibold text-slate-900">{result.supplier}</h4>
-                          <p className="text-sm text-slate-500">PR {result.prId}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-lg font-bold text-slate-900">${result.price}</p>
-                          <p className="text-sm text-amber-600">⭐ {result.rating}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Performance Tab */}
-        <TabsContent value="performance">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>System Health</CardTitle>
-                <CardDescription>Real-time monitoring metrics</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Supabase Connection</span>
-                  <span className={`font-semibold ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
-                    {isConnected ? '✓ Connected' : '✗ Disconnected'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Real-time Sync</span>
-                  <span className="font-semibold text-green-600">✓ Active</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Telegram Bot</span>
-                  <span className="font-semibold text-green-600">✓ Active</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Cron Tasks</span>
-                  <span className="font-semibold text-green-600">✓ 4 Running</span>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Daily Summary</CardTitle>
-                <CardDescription>Today's statistics</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">PRs Processed</span>
-                  <span className="font-semibold text-slate-900">{stats.totalPRs}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Success Rate</span>
-                  <span className="font-semibold text-green-600">
-                    {stats.totalPRs > 0 ? Math.round((stats.completedPRs / stats.totalPRs) * 100) : 0}%
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Avg Response Time</span>
-                  <span className="font-semibold text-slate-900">2.5 min</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Last Update</span>
-                  <span className="font-semibold text-slate-900">{lastUpdate.toLocaleTimeString()}</span>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-      </Tabs>
-
-      {/* Footer */}
-      <div className="mt-8 text-center text-sm text-slate-500">
-        <p>🦞 OpenClaw Dragon Lobster Monitoring System</p>
-        <p>Last synced: {lastUpdate.toLocaleString()}</p>
+        )}
       </div>
     </div>
   );
