@@ -208,6 +208,7 @@ const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(
 export default defineConfig({
   plugins,
   optimizeDeps: {
+    include: ["react", "react-dom"],
     esbuildOptions: {
       define: {
         global: "globalThis",
@@ -216,7 +217,13 @@ export default defineConfig({
         ".js": "jsx",
       },
       resolveExtensions: [".ts", ".tsx", ".js", ".jsx"],
+      supported: {
+        "dynamic-import": true,
+      },
     },
+  },
+  ssr: {
+    noExternal: ["react", "react-dom"],
   },
   resolve: {
     alias: {
